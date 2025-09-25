@@ -53,13 +53,61 @@ elif page == "Data table & summary":
 
 # page 3: Plots (interactive)
 elif page == "Plots (interactive)":
-    st.subheader("Interactive plots")
-    st.write("Placeholder for now. We’ll add:")
-    st.markdown(
-        "- A selectbox to choose a single column or all columns\n"
-        "- A month slider to subset the data\n"
-        "- Line charts per column and combined"
-    )
+    try:
+        df = load_data(data_path)
+        if "time" not in df.columns:
+            st.error("Expected a 'time' column in the CSV.")
+        else:
+            # Month list for the slider
+            df["month"] = df["time"].dt.to_period("M")
+            months = sorted(df["month"].unique().tolist())
+            default_month = months[0] if months else None
+
+            st.subheader("Interactive plots")
+            col1, col2 = st.columns([1, 2])
+
+            # Choose month (single month, defaults to first month)
+            with col1:
+                picked_month = st.select_slider(
+                    "Select month",
+                    options=months,
+                    value=default_month,
+                    help="Subset the data to a single month."
+                )
+
+            # Filter by month
+            dff = df[df["month"] == picked_month].copy()
+
+            # Numeric columns to plot (skip helper columns)
+            numeric_cols = [c for c in dff.select_dtypes("number").columns if c not in ["month"]]
+            choices = ["All columns"] + numeric_cols
+
+            # Choose one column or all
+            with col2:
+                pick = st.selectbox(
+                    "Choose a column to plot",
+                    options=choices,
+                    index=0,
+                    help="Plot one variable or all numeric variables together."
+                )
+
+            # Time on the x-axis
+            dff = dff.set_index("time")
+
+            st.caption(f"Rows in {picked_month}: {len(dff)}")
+
+            # Plot
+            if pick == "All columns":
+                if numeric_cols:
+                    st.line_chart(dff[numeric_cols], width="stretch")
+                else:
+                    st.warning("No numeric columns to plot.")
+            else:
+                st.line_chart(dff[[pick]], width="stretch")
+
+    except Exception as e:
+        st.error(str(e))
+
 
 # page 4: About / Notes
 else:
