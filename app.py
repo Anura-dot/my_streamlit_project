@@ -38,18 +38,46 @@ if page == "Home":
 
 # page 2: Data table & summary
 elif page == "Data table & summary":
-
-
     try:
         df = load_data(data_path)
+
         st.subheader("First rows")
-        st.dataframe(df.head(), use_container_width=True)
+        st.dataframe(df.head(), width="stretch")
 
         st.subheader("Describe")
-        st.dataframe(df.describe(include='all').transpose(), use_container_width=True)
+        st.dataframe(df.describe(include="all").transpose(), width="stretch")
 
+    
+        if "time" in df.columns:
+            # build first-month subset
+            df["time"] = pd.to_datetime(df["time"], errors="coerce")
+            df["month"] = df["time"].dt.to_period("M")
+            first_month = df["month"].min()
+            month_df = df[df["month"] == first_month].reset_index(drop=True)
+
+            # one row per numeric column with the first month
+            numeric_cols = [c for c in month_df.select_dtypes("number").columns if c != "month"]
+            spark = pd.DataFrame({
+                "variable": numeric_cols,
+                "trend": [month_df[c].astype(float).tolist() for c in numeric_cols],
+            })
+
+            st.subheader(f"First-month sparkline (row-wise) — {first_month}")
+            st.dataframe(
+                spark,
+                column_config={
+                    "variable": "Column",
+                    "trend": st.column_config.LineChartColumn("First month"),
+                },
+                hide_index=True,
+                width="stretch",
+            )
+        else:
+            st.warning("No 'time' column found; cannot build first-month sparkline table.")
+        
     except Exception as e:
         st.error(str(e))
+
 
 # page 3: Plots (interactive)
 elif page == "Plots (interactive)":
