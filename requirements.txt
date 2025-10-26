@@ -1,3 +1,10 @@
-streamlit
-pandas
-altair
+streamlit>=1.33
+pandas>=2.0
+numpy>=1.25
+altair>=5.0
+plotly>=5.15
+pymongo[srv]>=4.6
+python-dateutil>=2.8
+python-dotenv
+requests
+matplotlib
