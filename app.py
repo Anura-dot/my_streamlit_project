@@ -6,8 +6,6 @@ from pymongo import MongoClient
 import plotly.express as px
 import plotly.graph_objects as go
 
-from mongodb_config import get_mongodb_collection
-
 # App setup
 st.set_page_config(page_title="IND320 • Data Check v2", layout="wide")
 
@@ -244,12 +242,11 @@ elif page == "P 4: Elhub Data":
     st.caption("Assignment 2 requirements implemented within Page 4 of Assignment 1")
 
     # 1) Connect to MongoDB
-    try:
-        coll = get_mongodb_collection()
-    except Exception as e:
-        st.error(f"❌ Cannot connect to MongoDB: {e}")
+    client = init_mongodb_connection()
+    if client is None:
+        st.error("❌ Cannot connect to MongoDB. Check Streamlit Secrets and network.")
         st.info(
-            "**Check `.streamlit/secrets.toml`**:\n\n"
+            "**Cloud Secrets must contain:**\n\n"
             "```\n[mongodb]\n"
             'connection_string = "mongodb+srv://..."\n'
             'database_name = "elhub"\n'
@@ -260,9 +257,8 @@ elif page == "P 4: Elhub Data":
 
     # 2) Load data
     with st.spinner("Loading data from MongoDB..."):
-        df = pd.DataFrame(list(coll.find({}, {"_id": 0})))
+        df = load_mongodb_data(client)
 
-    # Always show what we actually got
     st.caption(f"Raw rows: {len(df):,}")
     st.caption(f"Raw columns: {sorted(df.columns.tolist())}")
 
@@ -270,8 +266,7 @@ elif page == "P 4: Elhub Data":
         st.warning("⚠️ No data available in MongoDB collection.")
         st.stop()
 
-    # ---------- 3) Coalesce duplicate semantic columns BEFORE renaming ----------
-    # If both exist, merge to canonical and drop the twin
+    # 3) Coalesce duplicate semantic columns BEFORE renaming
     if "startTime" in df.columns and "timestamp" in df.columns:
         st.caption("Coalescing 'startTime' with 'timestamp'")
         df["startTime"] = pd.to_datetime(df["startTime"], errors="coerce").combine_first(
@@ -284,37 +279,28 @@ elif page == "P 4: Elhub Data":
         df["priceArea"] = df["priceArea"].astype(object).combine_first(df["region"])
         df.drop(columns=["region"], inplace=True)
 
-    # ---------- 4) Normalize column names (case-insensitive) ----------
+    # 4) Normalize column names (case-insensitive)
     rename_map = {
-        # time
-        "timestamp": "startTime", "start_time": "startTime", "time": "startTime",
-        # price area
-        "pricearea": "priceArea", "price_area": "priceArea", "region": "priceArea",
-        # group
-        "productiongroup": "productionGroup", "production_group": "productionGroup", "group": "productionGroup",
-        # value
-        "quantitykwh": "quantityKwh", "quantity_kwh": "quantityKwh",
-        "kwh": "quantityKwh", "quantity": "quantityKwh",
-        "energy_production": "quantityKwh",  # your Atlas field
+        "timestamp":"startTime","start_time":"startTime","time":"startTime",
+        "pricearea":"priceArea","price_area":"priceArea","region":"priceArea",
+        "productiongroup":"productionGroup","production_group":"productionGroup","group":"productionGroup",
+        "quantitykwh":"quantityKwh","quantity_kwh":"quantityKwh","kwh":"quantityKwh","quantity":"quantityKwh",
+        "energy_production":"quantityKwh"
     }
-    renames = {}
-    for c in list(df.columns):
-        lc = c.strip().lower()
-        if lc in rename_map and rename_map[lc] != c:
-            renames[c] = rename_map[lc]
+    renames = {c: rename_map[c.strip().lower()] for c in list(df.columns)
+               if c.strip().lower() in rename_map and rename_map[c.strip().lower()] != c}
     if renames:
         df.rename(columns=renames, inplace=True)
         st.caption(f"Normalized columns: {renames}")
 
-    # If duplicates still remain after rename, keep first occurrence
     if df.columns.duplicated().any():
-        dupe_list = [c for c, d in zip(df.columns, df.columns.duplicated()) if d]
-        st.caption(f"Dropping duplicate columns: {dupe_list}")
+        dupes = [c for c, d in zip(df.columns, df.columns.duplicated()) if d]
+        st.caption(f"Dropping duplicate columns: {dupes}")
         df = df.loc[:, ~df.columns.duplicated()]
 
     st.caption(f"Columns after cleanup: {sorted(df.columns.tolist())}")
 
-    # ---------- 5) Detect columns and coerce types ----------
+    # 5) Detect columns and coerce types
     def pick(cols, candidates):
         for c in candidates:
             if c in cols:
@@ -322,95 +308,71 @@ elif page == "P 4: Elhub Data":
         return None
 
     cols = set(df.columns)
-    time_col  = pick(cols, ["startTime", "timestamp", "time"])
-    area_col  = pick(cols, ["priceArea", "region", "price_area", "pricearea"])
-    group_col = pick(cols, ["productionGroup", "group", "production_group"])
-    value_col = pick(cols, ["quantityKwh", "energy_production", "quantity", "kwh", "value"])
+    time_col  = pick(cols, ["startTime","timestamp","time"])
+    area_col  = pick(cols, ["priceArea","region","price_area","pricearea"])
+    group_col = pick(cols, ["productionGroup","group","production_group"])
+    value_col = pick(cols, ["quantityKwh","energy_production","quantity","kwh","value"])
 
-    st.caption(f"Detected columns → time: {time_col}, area: {area_col}, group: {group_col}, value: {value_col}")
-
-    missing_roles = [k for k, v in {
-        "time": time_col, "area": area_col, "group": group_col, "value": value_col
-    }.items() if v is None]
+    st.caption(f"Detected → time: {time_col}, area: {area_col}, group: {group_col}, value: {value_col}")
 
     if time_col:
         df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
         df = df.dropna(subset=[time_col])
         df["month"] = df[time_col].dt.to_period("M").astype(str)
-
     if value_col:
         df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
 
-    # --- show month coverage ---
-    if "startTime" in df.columns:
-        st.caption(f"Date range: {df['startTime'].min()} → {df['startTime'].max()}")
+    # month summary only if exists
     if "month" in df.columns:
         month_counts = df["month"].value_counts().sort_index()
         st.caption(f"Months found: {', '.join(month_counts.index.tolist())}")
-    with st.expander("📅 Rows per month"):
-        st.dataframe(month_counts.rename("rows").to_frame(), use_container_width=True)
+        with st.expander("📅 Rows per month"):
+            st.dataframe(month_counts.rename("rows").to_frame(), use_container_width=True)
 
     with st.expander("👀 Data preview", expanded=False):
         st.dataframe(df.head(50), use_container_width=True)
 
+    # require roles
+    missing_roles = [k for k, v in {"time":time_col,"area":area_col,"group":group_col,"value":value_col}.items() if v is None]
     if missing_roles:
-        st.error(f"Missing required roles for plotting: {missing_roles}. "
-                 "Fix names in Mongo or extend the mapping above.")
+        st.error(f"Missing required roles for plotting: {missing_roles}. Fix names in Mongo or extend the mapping.")
         st.stop()
 
     st.success(f"✅ Ready. Using → time: {time_col}, area: {area_col}, group: {group_col}, value: {value_col}")
 
-    # ---------- 6) Two-column layout ----------
+    # 6) Two-column layout
     left, right = st.columns(2)
 
-    # LEFT: radio + PIE
+    # LEFT: Pie
     with left:
         st.subheader("📊 Production by Price Area")
         areas = sorted(df[area_col].dropna().unique().tolist())
-        if not areas:
-            st.warning("No price areas found.")
-        else:
+        if areas:
             area = st.radio("Select price area", areas, key="p4_area")
             pie_df = (
                 df[df[area_col] == area]
-                .groupby(group_col, dropna=False)[value_col]
-                .sum()
+                .groupby(group_col, dropna=False)[value_col].sum()
                 .reset_index()
-                .rename(columns={group_col: "Production Group", value_col: "Total (kWh)"})
+                .rename(columns={group_col:"Production Group", value_col:"Total (kWh)"})
                 .sort_values("Total (kWh)", ascending=False)
             )
-            fig_pie = px.pie(
-                pie_df,
-                values="Total (kWh)",
-                names="Production Group",
-                title=f"Production Distribution — {area}",
-                hole=0.3,
-            )
+            fig_pie = px.pie(pie_df, values="Total (kWh)", names="Production Group",
+                             title=f"Production Distribution — {area}", hole=0.3)
             fig_pie.update_traces(textposition="inside", textinfo="percent+label")
             fig_pie.update_layout(height=420)
             st.plotly_chart(fig_pie, use_container_width=True)
+        else:
+            st.warning("No price areas found.")
 
-    # RIGHT: pills/multiselect + month + LINE
+    # RIGHT: Line
     with right:
         st.subheader("📈 Hourly Production (select groups + month)")
         groups = sorted(df[group_col].dropna().unique().tolist())
-
-        if hasattr(st, "pills"):
-            selected_groups = st.pills(
-                "Select production group(s):",
-                options=groups,
-                selection_mode="multi",
-                default=[groups[0]] if groups else [],
-                key="p4_groups",
-            )
-        else:
-            selected_groups = st.multiselect(
-                "Select production group(s):",
-                options=groups,
-                default=[groups[0]] if groups else [],
-                key="p4_groups_ms",
-            )
-
+        selected_groups = (st.pills("Select production group(s):", options=groups, selection_mode="multi",
+                                    default=[groups[0]] if groups else [], key="p4_groups")
+                           if hasattr(st, "pills") else
+                           st.multiselect("Select production group(s):", options=groups,
+                                          default=[groups[0]] if groups else [], key="p4_groups_ms"))
         months = sorted(df["month"].dropna().unique().tolist()) if "month" in df.columns else []
         month = st.selectbox("Select month", options=months, index=0 if months else None, key="p4_month")
 
@@ -420,27 +382,19 @@ elif page == "P 4: Elhub Data":
                 st.warning(f"No data for {selected_groups} in {month}.")
             else:
                 line_df = line_df.sort_values(time_col)
-                fig_line = px.line(
-                    line_df,
-                    x=time_col,
-                    y=value_col,
-                    color=group_col,
-                    title=f"Hourly Production — {month}",
-                    labels={time_col: "Date & Time", value_col: "Production (kWh)", group_col: "Group"},
-                )
+                fig_line = px.line(line_df, x=time_col, y=value_col, color=group_col,
+                                   title=f"Hourly Production — {month}",
+                                   labels={time_col:"Date & Time", value_col:"Production (kWh)", group_col:"Group"})
                 fig_line.update_layout(hovermode="x unified", height=420)
                 st.plotly_chart(fig_line, use_container_width=True)
                 st.caption(f"Showing {len(line_df):,} points")
         else:
             st.info("Pick at least one production group and a month.")
 
-    # DOC EXPANDER
     st.markdown("---")
     with st.expander("📚 Data source & pipeline"):
         st.markdown(
-            """
-- **Source:** Elhub API — 2021 hourly production (PRODUCTION_PER_GROUP_MBA_HOUR)  
-- **ETL:** API → Cassandra (staging) → Spark transform → MongoDB Atlas (`elhub.production_mbahour`)  
-- **This page:** reads from MongoDB via Streamlit secrets. No credentials in code.
-            """
+            "- **Source:** Elhub API — 2021 hourly production (PRODUCTION_PER_GROUP_MBA_HOUR)\n"
+            "- **ETL:** API → Cassandra (staging) → Spark transform → MongoDB Atlas (`elhub.production_mbahour`)\n"
+            "- **This page:** reads from MongoDB via Streamlit secrets. No credentials in code."
         )
